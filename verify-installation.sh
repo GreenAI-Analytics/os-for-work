@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+# Don't use set -euo pipefail at the top since we want to continue through errors
 
 VERIFY_LOGFILE="$HOME/os-for-work-verify.log"
 INSTALL_LOGFILE="$HOME/os-for-work-install.log"
@@ -22,38 +22,30 @@ log_step() { log "$BLUE[STEP]" "$*"; }
 log_success() { log "$GREEN[✓]" "$*"; }
 log_fail() { log "$RED[✗]" "$*"; }
 
-# === Welcome ===
-clear
-echo "========================================="
-echo "   OS for Work - Installation Verifier"
-echo "========================================="
-log_info "Verifying installation completeness..."
-log_info "Verification log: $VERIFY_LOGFILE"
-
 # Counters for summary
 TOTAL_CHECKS=0
 PASSED_CHECKS=0
 FAILED_CHECKS=0
 WARNING_CHECKS=0
 
-# Verification functions
+# Safe verification functions that don't exit on error
 check_command() {
     local cmd="$1"
     local name="$2"
     local critical="${3:-true}"
     
-    ((TOTAL_CHECKS++))
+    ((TOTAL_CHECKS++)) || true
     if command -v "$cmd" >/dev/null 2>&1; then
         log_success "$name is installed"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     else
         if [[ "$critical" == "true" ]]; then
             log_fail "$name is NOT installed"
-            ((FAILED_CHECKS++))
+            ((FAILED_CHECKS++)) || true
         else
             log_warn "$name is NOT installed (optional)"
-            ((WARNING_CHECKS++))
+            ((WARNING_CHECKS++)) || true
         fi
         return 1
     fi
@@ -63,14 +55,14 @@ check_package() {
     local pkg="$1"
     local name="$2"
     
-    ((TOTAL_CHECKS++))
-    if dpkg -l | grep -q "^ii  $pkg "; then
+    ((TOTAL_CHECKS++)) || true
+    if dpkg -l 2>/dev/null | grep -q "^ii  $pkg "; then
         log_success "$name (APT package) is installed"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     else
         log_fail "$name (APT package) is NOT installed"
-        ((FAILED_CHECKS++))
+        ((FAILED_CHECKS++)) || true
         return 1
     fi
 }
@@ -79,14 +71,14 @@ check_snap() {
     local snap="$1"
     local name="$2"
     
-    ((TOTAL_CHECKS++))
-    if snap list 2>/dev/null | grep -q "^$snap "; then
+    ((TOTAL_CHECKS++)) || true
+    if command -v snap >/dev/null 2>&1 && snap list 2>/dev/null | grep -q "^$snap "; then
         log_success "$name (Snap) is installed"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     else
         log_fail "$name (Snap) is NOT installed"
-        ((FAILED_CHECKS++))
+        ((FAILED_CHECKS++)) || true
         return 1
     fi
 }
@@ -95,14 +87,14 @@ check_directory() {
     local dir="$1"
     local name="$2"
     
-    ((TOTAL_CHECKS++))
+    ((TOTAL_CHECKS++)) || true
     if [ -d "$dir" ]; then
         log_success "$name directory exists: $dir"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     else
         log_fail "$name directory missing: $dir"
-        ((FAILED_CHECKS++))
+        ((FAILED_CHECKS++)) || true
         return 1
     fi
 }
@@ -111,14 +103,14 @@ check_file() {
     local file="$1"
     local name="$2"
     
-    ((TOTAL_CHECKS++))
+    ((TOTAL_CHECKS++)) || true
     if [ -f "$file" ]; then
         log_success "$name exists: $file"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     else
         log_fail "$name missing: $file"
-        ((FAILED_CHECKS++))
+        ((FAILED_CHECKS++)) || true
         return 1
     fi
 }
@@ -127,18 +119,18 @@ check_desktop_file() {
     local file="$1"
     local name="$2"
     
-    ((TOTAL_CHECKS++))
+    ((TOTAL_CHECKS++)) || true
     if [ -f "$file" ] && [ -x "$file" ]; then
         log_success "$name desktop shortcut exists and is executable"
-        ((PASSED_CHECKS++))
+        ((PASSED_CHECKS++)) || true
         return 0
     elif [ -f "$file" ] && [ ! -x "$file" ]; then
         log_warn "$name desktop shortcut exists but is not executable"
-        ((WARNING_CHECKS++))
+        ((WARNING_CHECKS++)) || true
         return 1
     else
         log_fail "$name desktop shortcut missing: $file"
-        ((FAILED_CHECKS++))
+        ((FAILED_CHECKS++)) || true
         return 1
     fi
 }
@@ -246,7 +238,7 @@ verify_installation() {
     if [ -n "${DISPLAY:-}" ]; then
         log_step "Testing GUI application availability..."
         if command -v libreoffice >/dev/null; then
-            if libreoffice --version >/dev/null 2>&1; then
+            if timeout 5s libreoffice --version >/dev/null 2>&1; then
                 log_success "LibreOffice starts successfully"
             else
                 log_warn "LibreOffice found but may have startup issues"
@@ -329,21 +321,21 @@ quick_verify() {
     
     for check in "${quick_checks[@]}"; do
         IFS=':' read -r cmd name type <<< "$check"
-        ((quick_total++))
+        ((quick_total++)) || true
         
         case "${type:-cmd}" in
             "cmd")
-                if command -v "$cmd" >/dev/null; then
+                if command -v "$cmd" >/dev/null 2>&1; then
                     log_success "$name is installed"
-                    ((quick_passed++))
+                    ((quick_passed++)) || true
                 else
                     log_fail "$name is NOT installed"
                 fi
                 ;;
             "snap")
-                if snap list 2>/dev/null | grep -q "^$cmd "; then
+                if command -v snap >/dev/null 2>&1 && snap list 2>/dev/null | grep -q "^$cmd "; then
                     log_success "$name is installed"
-                    ((quick_passed++))
+                    ((quick_passed++)) || true
                 else
                     log_fail "$name is NOT installed"
                 fi
@@ -401,6 +393,14 @@ check_specific_component() {
     esac
 }
 
+# === Welcome ===
+clear
+echo "========================================="
+echo "   OS for Work - Installation Verifier"
+echo "========================================="
+log_info "Verifying installation completeness..."
+log_info "Verification log: $VERIFY_LOGFILE"
+
 # === Main Function ===
 main() {
     while true; do
@@ -408,14 +408,23 @@ main() {
         read -p "Choose option [1-6]: " choice
         case $choice in
             1) 
-                TOTAL_CHECKS=0; PASSED_CHECKS=0; FAILED_CHECKS=0; WARNING_CHECKS=0
+                # Reset counters
+                TOTAL_CHECKS=0
+                PASSED_CHECKS=0
+                FAILED_CHECKS=0
+                WARNING_CHECKS=0
                 verify_installation
                 generate_report
                 ;;
-            2) quick_verify ;;
-            3) check_specific_component ;;
+            2) 
+                quick_verify
+                ;;
+            3) 
+                check_specific_component
+                ;;
             4) 
                 if [ -f "$INSTALL_LOGFILE" ]; then
+                    echo "Showing installation log (press 'q' to exit):"
                     less "$INSTALL_LOGFILE"
                 else
                     log_error "Installation log not found: $INSTALL_LOGFILE"
@@ -423,20 +432,28 @@ main() {
                 ;;
             5) 
                 if [ -f "$VERIFY_LOGFILE" ]; then
+                    echo "Showing verification log (press 'q' to exit):"
                     less "$VERIFY_LOGFILE"
                 else
                     log_error "Verification log not found. Run a verification first."
                 fi
                 ;;
-            6) log_info "Exiting verifier"; exit 0 ;;
-            *) log_error "Invalid option" ;;
+            6) 
+                log_info "Exiting verifier"
+                exit 0
+                ;;
+            *) 
+                log_error "Invalid option"
+                ;;
         esac
         echo ""
         read -p "Press Enter to continue..."
     done
 }
 
-# Script entry point
+# Script entry point - use trap to catch errors but continue
+trap 'log_error "Script interrupted"; exit 1' INT
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
