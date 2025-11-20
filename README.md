@@ -21,22 +21,6 @@ This project empowers SMEs across Ireland and the EU with accessible, compliance
 
 ---
 
-## 📂 Project Structure
-```
-os-for-work/
-├── install.sh        # Main installer script
-├── modules/          # Category-specific install scripts
-│   ├── productivity.sh
-│   ├── communication.sh
-│   ├── finance.sh
-│   ├── creative.sh
-│   └── security.sh
-├── README.md         # Documentation
-└── LICENSE           # License file
-```
-
----
-
 ## 🚀 Installation
 Clone the repository and run the installer:
 
