@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.3.2"
 LOGFILE="$HOME/os-for-work-install.log"
 
 # Colors
@@ -20,6 +20,33 @@ log_warn() { log "$YELLOW[WARN]" "$*"; }
 log_error(){ log "$RED[ERROR]" "$*"; }
 log_step() { log "$BLUE[STEP]" "$*"; }
 
+# Error handling wrapper
+run_step() {
+    local step_name="$1"
+    local step_command="$2"
+    
+    log_step "$step_name..."
+    if eval "$step_command" 2>> "$LOGFILE"; then
+        log_info "$step_name completed successfully"
+        return 0
+    else
+        log_error "$step_name failed - check $LOGFILE for details"
+        return 1
+    fi
+}
+
+# Safe command execution with logging
+safe_run() {
+    local cmd="$*"
+    log_info "Running: $cmd"
+    if eval "$cmd" >> "$LOGFILE" 2>&1; then
+        return 0
+    else
+        log_warn "Command completed with non-zero exit: $cmd"
+        return 1
+    fi
+}
+
 # === Welcome Banner ===
 clear
 echo "========================================="
@@ -28,6 +55,10 @@ echo "   Local SME Workstation Setup"
 echo "========================================="
 log_info "Welcome! This script will install SME-friendly desktop tools."
 log_info "Logs will be written to $LOGFILE"
+echo ""
+
+# Continue even if some parts fail
+set +e
 
 # === Distribution Detection ===
 detect_distro() {
@@ -39,13 +70,15 @@ detect_distro() {
         DISTRO_NAME="${NAME:-$ID}"
         log_info "Detected: $DISTRO_NAME $DISTRO_VERSION_ID"
     else
-        log_error "Cannot detect distribution"
-        exit 1
+        log_warn "Cannot detect distribution, continuing with basic assumptions"
+        DISTRO_ID="unknown"
+        DISTRO_NAME="Unknown Linux"
     fi
     
     # Check if Debian-based
     if ! command -v apt >/dev/null; then
         log_error "This script requires a Debian-based distribution (apt package manager)"
+        log_info "Please run on Ubuntu, Debian, Linux Mint, or other Debian-based systems"
         exit 1
     fi
 }
@@ -53,92 +86,192 @@ detect_distro() {
 # === Dependency Checks ===
 check_dependencies() {
     log_step "Checking system dependencies..."
-    for cmd in apt sudo; do
-        if ! command -v "$cmd" >/dev/null; then
-            log_error "Missing dependency: $cmd"
-            exit 1
-        fi
-    done
+    
+    # Check for sudo
+    if ! command -v sudo >/dev/null; then
+        log_error "sudo is required but not installed."
+        log_info "Please install sudo or run as root with appropriate permissions"
+        exit 1
+    fi
+    
+    # Check for apt
+    if ! command -v apt >/dev/null; then
+        log_error "apt is required but not installed."
+        exit 1
+    fi
     
     # Check for GUI environment (warn but don't exit)
     if [ -z "${DISPLAY:-}" ] && [ -z "${XDG_CURRENT_DESKTOP:-}" ]; then
         log_warn "No GUI environment detected. Some applications may not work properly."
+        log_warn "Continuing with installation..."
     else
         log_info "GUI environment detected."
     fi
+    
+    log_info "Basic dependencies verified."
+}
+
+# === Config Backup for Uninstall ===
+backup_configs() {
+    local backup_dir="$HOME/os-for-work-backups"
+    safe_run "mkdir -p '$backup_dir'"
+    local ts
+    ts=$(date +%Y%m%d_%H%M%S)
+    local file="$backup_dir/config_backup_$ts.tar.gz"
+    
+    log_step "Backing up configurations..."
+    
+    # Backup important configs and workspace
+    safe_run "tar -czf '$file' \
+        '$HOME/.config' \
+        '$HOME/Workspace' \
+        '$HOME/Templates' \
+        '$HOME/.thunderbird' \
+        '$HOME/.config/libreoffice' \
+        '$HOME/.local/share/applications'/*.desktop \
+        2>/dev/null" || true
+        
+    if [ -f "$file" ]; then
+        log_info "Configuration and workspace backed up to $file"
+    else
+        log_warn "Backup creation failed or no files to backup"
+    fi
+}
+
+# === Uninstall Option ===
+uninstall_all() {
+    log_warn "=== UNINSTALL OS FOR WORK ==="
+    log_warn "This will remove all installed applications and shortcuts."
+    log_warn "Your data in ~/Workspace/ and ~/Templates/ will be preserved."
+    echo ""
+    read -p "Are you sure you want to continue? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Uninstall cancelled."
+        return
+    fi
+
+    backup_configs
+
+    log_step "Removing installed applications..."
+    
+    # Remove APT packages (only if they are installed)
+    local packages=(
+        thunderbird libreoffice* gnucash gimp inkscape keepassxc veracrypt 
+        deja-dup filezilla kmymoney scribus kdenlive audacity pdfarranger 
+        syncthing torbrowser-launcher baobab htop glances simple-scan 
+        ocrfeeder gtimelog ktimetracker hamster-time-tracker python3-pip
+        nodejs npm build-essential gitk meld darktable rawtherapee
+        seahorse gnome-keyring gparted timeshift stacer
+    )
+    
+    local removed_packages=()
+    for pkg in "${packages[@]}"; do
+        if dpkg -l | grep -q "^ii  ${pkg%%\*}"; then
+            if safe_run "sudo apt remove --purge -y '$pkg'"; then
+                removed_packages+=("$pkg")
+            else
+                log_warn "Failed to remove: $pkg"
+            fi
+        fi
+    done
+    
+    # Clean up dependencies
+    safe_run "sudo apt autoremove -y --purge"
+    
+    # Remove snaps
+    log_step "Removing Snap applications..."
+    if snap list element-desktop 2>/dev/null | grep -q element-desktop; then
+        safe_run "sudo snap remove element-desktop" || log_warn "Failed to remove Element Desktop"
+    fi
+    
+    if snap list code 2>/dev/null | grep -q code; then
+        safe_run "sudo snap remove code" || log_warn "Failed to remove VS Code"
+    fi
+    
+    # Remove desktop shortcuts and web app entries
+    log_step "Removing shortcuts..."
+    safe_run "rm -f '$HOME/Desktop/'*.desktop"
+    safe_run "rm -f '$HOME/.local/share/applications/'jitsi-meet-web.desktop"
+    safe_run "rm -f '$HOME/.local/share/applications/'google-meet-web.desktop"
+    
+    log_info "=== Uninstall Complete ==="
+    log_info "Removed ${#removed_packages[@]} packages"
+    log_info "Your data is preserved in:"
+    log_info "  - $HOME/Workspace/"
+    log_info "  - $HOME/Templates/"
+    log_info "  - $HOME/os-for-work-backups/"
+    log_info "Backup created: $(ls -t "$HOME/os-for-work-backups/"config_backup_*.tar.gz 2>/dev/null | head -1)"
 }
 
 # === System Update ===
 update_system() {
-    log_step "Updating system packages..."
-    sudo apt update && sudo apt -y upgrade
-    sudo apt install -y curl wget  # Ensure basic tools
-    log_info "System updated."
+    run_step "Updating package lists" "sudo apt update"
+    run_step "Upgrading system packages" "sudo apt upgrade -y"
+    run_step "Installing basic tools" "sudo apt install -y curl wget"
 }
 
 # === Snap Setup ===
 ensure_snap_ready() {
     log_step "Setting up Snap..."
+    
     if ! command -v snap >/dev/null; then
         log_info "Installing snapd..."
-        sudo apt install -y snapd
+        safe_run "sudo apt install -y snapd"
+    else
+        log_info "Snap already installed."
     fi
     
-    # Start and enable snapd
+    # Start and enable snapd (but don't fail if it doesn't work)
     if command -v systemctl >/dev/null; then
-        sudo systemctl enable --now snapd.socket 2>/dev/null || true
-        sudo systemctl start snapd.socket 2>/dev/null || true
-        sudo systemctl enable --now snapd 2>/dev/null || true
-        sudo systemctl start snapd 2>/dev/null || true
+        safe_run "sudo systemctl enable --now snapd.socket" || true
+        safe_run "sudo systemctl start snapd.socket" || true
+        safe_run "sudo systemctl enable --now snapd" || true
+        safe_run "sudo systemctl start snapd" || true
     fi
     
     # Ensure snap directory structure
     if [ ! -d /snap ] && [ -d /var/lib/snapd/snap ]; then
-        sudo ln -s /var/lib/snapd/snap /snap 2>/dev/null || true
+        safe_run "sudo ln -s /var/lib/snapd/snap /snap" || true
     fi
     
     # Add to PATH for current session
     export PATH="$PATH:/snap/bin"
     
     # Wait for snap to initialize
-    sleep 3
+    sleep 2
     log_info "Snap setup complete."
-}
-
-# === Flatpak Setup ===
-ensure_flatpak_ready() {
-    log_step "Setting up Flatpak..."
-    if ! command -v flatpak >/dev/null; then
-        log_info "Installing flatpak..."
-        sudo apt install -y flatpak
-        # Add Flathub repository
-        sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-        log_info "Flatpak installed and Flathub repository added."
-    else
-        log_info "Flatpak already installed."
-    fi
 }
 
 # === Installation Functions ===
 
 install_productivity_suite() {
     log_step "Installing Productivity Suite..."
-    sudo apt install -y \
-        thunderbird \
-        libreoffice \
-        libreoffice-l10n-en-gb \
-        hunspell-en-gb \
-        gnucash \
-        gimp \
-        inkscape \
-        keepassxc \
-        veracrypt \
-        deja-dup \
-        git \
-        vim \
-        nautilus \
+    
+    local packages=(
+        thunderbird
+        libreoffice
+        libreoffice-l10n-en-gb
+        hunspell-en-gb
+        gnucash
+        gimp
+        inkscape
+        keepassxc
+        veracrypt
+        deja-dup
+        git
+        vim
+        nautilus
         filezilla
-    log_info "Productivity Suite installed."
+    )
+    
+    for pkg in "${packages[@]}"; do
+        if ! safe_run "sudo apt install -y $pkg"; then
+            log_warn "Failed to install $pkg, continuing..."
+        fi
+    done
+    
+    log_info "Productivity Suite installation attempted."
 }
 
 install_communication_suite() {
@@ -147,7 +280,11 @@ install_communication_suite() {
     
     # Install Element via Snap
     if ! snap list element-desktop 2>/dev/null | grep -q element-desktop; then
-        sudo snap install element-desktop
+        if safe_run "sudo snap install element-desktop"; then
+            log_info "Element Desktop installed via Snap"
+        else
+            log_warn "Failed to install Element Desktop via Snap"
+        fi
     else
         log_info "Element Desktop already installed."
     fi
@@ -186,79 +323,114 @@ EOF
 
 install_finance_suite() {
     log_step "Installing Finance Suite..."
-    sudo apt install -y kmymoney
-    log_info "Finance Suite installed (GnuCash + KMyMoney)."
+    safe_run "sudo apt install -y kmymoney" || log_warn "KMyMoney installation failed"
+    log_info "Finance Suite installation attempted."
 }
 
 install_creative_suite() {
     log_step "Installing Creative Suite..."
-    sudo apt install -y \
-        scribus \
-        kdenlive \
-        audacity \
-        pdfarranger \
-        darktable \
+    
+    local packages=(
+        scribus
+        kdenlive
+        audacity
+        pdfarranger
+        darktable
         rawtherapee
-    log_info "Creative Suite installed."
+    )
+    
+    for pkg in "${packages[@]}"; do
+        safe_run "sudo apt install -y $pkg" || log_warn "Failed to install $pkg"
+    done
+    
+    log_info "Creative Suite installation attempted."
 }
 
 install_security_suite() {
     log_step "Installing Security Suite..."
-    sudo apt install -y \
-        syncthing \
-        torbrowser-launcher \
-        seahorse \
+    
+    local packages=(
+        syncthing
+        torbrowser-launcher
+        seahorse
         gnome-keyring
-    log_info "Security Suite installed."
+    )
+    
+    for pkg in "${packages[@]}"; do
+        safe_run "sudo apt install -y $pkg" || log_warn "Failed to install $pkg"
+    done
+    
+    log_info "Security Suite installation attempted."
 }
 
 install_utilities_suite() {
     log_step "Installing Utilities Suite..."
-    sudo apt install -y \
-        baobab \
-        htop \
-        glances \
-        simple-scan \
-        ocrfeeder \
-        gparted \
-        timeshift \
+    
+    local packages=(
+        baobab
+        htop
+        glances
+        simple-scan
+        ocrfeeder
+        gparted
+        timeshift
         stacer
-    log_info "Utilities Suite installed."
+    )
+    
+    for pkg in "${packages[@]}"; do
+        safe_run "sudo apt install -y $pkg" || log_warn "Failed to install $pkg"
+    done
+    
+    log_info "Utilities Suite installation attempted."
 }
 
 install_time_tracking_suite() {
     log_step "Installing Time Tracking Suite..."
-    sudo apt install -y \
-        gtimelog \
-        ktimetracker \
+    
+    local packages=(
+        gtimelog
+        ktimetracker
         hamster-time-tracker
-    log_info "Time Tracking Suite installed."
+    )
+    
+    for pkg in "${packages[@]}"; do
+        safe_run "sudo apt install -y $pkg" || log_warn "Failed to install $pkg"
+    done
+    
+    log_info "Time Tracking Suite installation attempted."
 }
 
 install_dev_tools_suite() {
     log_step "Installing Development Tools..."
-    sudo apt install -y \
-        python3 \
-        python3-pip \
-        python3-venv \
-        nodejs \
-        npm \
-        build-essential \
-        gitk \
+    
+    local packages=(
+        python3
+        python3-pip
+        python3-venv
+        nodejs
+        npm
+        build-essential
+        gitk
         meld
+    )
+    
+    for pkg in "${packages[@]}"; do
+        safe_run "sudo apt install -y $pkg" || log_warn "Failed to install $pkg"
+    done
     
     ensure_snap_ready
     if ! snap list code 2>/dev/null | grep -q code; then
-        sudo snap install code --classic
+        safe_run "sudo snap install code --classic" || log_warn "Failed to install VS Code via Snap"
     fi
     
-    log_info "Development Tools installed."
+    log_info "Development Tools installation attempted."
 }
 
 # === Workplace Templates ===
 setup_workspace() {
     log_step "Setting up workspace..."
-    mkdir -p "$HOME/Workspace/"{Projects,Documents,ClientWork,Administrative,Archive} "$HOME/Templates"
+    
+    safe_run "mkdir -p '$HOME/Workspace/'{Projects,Documents,ClientWork,Administrative,Archive} '$HOME/Templates'"
 
     # Project Plan Template
     cat > "$HOME/Templates/Project_Plan.md" <<'EOF'
@@ -289,29 +461,6 @@ Attendees: [Names]
 - [ ] Task 2 (Owner: [Name])
 EOF
 
-    # Business Invoice Template
-    cat > "$HOME/Templates/Business_Invoice.csv" <<'EOF'
-"Invoice Number","Date","Client","Description","Quantity","Unit Price","Total","VAT","Grand Total"
-"INV-001","$(date +%Y-%m-%d)","Client Name","Service Description","1","100.00","100.00","20.00","120.00"
-EOF
-
-    # Quick Reference Template
-    cat > "$HOME/Templates/Quick_Reference.md" <<'EOF'
-# Quick Reference
-## Communication
-- Email: Thunderbird
-- Team Chat: Element
-- Video Calls: Jitsi Meet / Google Meet
-## Productivity
-- Office Suite: LibreOffice
-- Finance: GnuCash / KMyMoney
-- Time Tracking: gtimelog
-## File Management
-- Cloud Sync: Nextcloud (optional)
-- Local Sync: Syncthing
-- Encryption: VeraCrypt
-EOF
-
     log_info "Workspace directories and templates created."
 }
 
@@ -319,7 +468,7 @@ EOF
 create_desktop_shortcuts() {
     log_step "Creating desktop shortcuts..."
     local DESKTOP_DIR="$HOME/Desktop"
-    mkdir -p "$DESKTOP_DIR"
+    safe_run "mkdir -p '$DESKTOP_DIR'"
     
     # Workspace Shortcut
     cat > "$DESKTOP_DIR/Workspace.desktop" <<EOF
@@ -347,111 +496,28 @@ Terminal=false
 Categories=Office;
 EOF
 
-    # Time Tracking Shortcut
-    cat > "$DESKTOP_DIR/Time-Tracking.desktop" <<EOF
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=⏱️ Time Tracking
-Comment=Launch time tracking application
-Exec=gtimelog
-Icon=gtimelog
-Terminal=false
-Categories=Office;
-EOF
-
-    chmod +x "$DESKTOP_DIR"/*.desktop
+    safe_run "chmod +x '$DESKTOP_DIR'/*.desktop"
     log_info "Desktop shortcuts created."
-}
-
-# === Config Backup for Uninstall ===
-backup_configs() {
-    local backup_dir="$HOME/os-for-work-backups"
-    mkdir -p "$backup_dir"
-    local ts
-    ts=$(date +%Y%m%d_%H%M%S)
-    local file="$backup_dir/config_backup_$ts.tar.gz"
-    
-    # Backup important configs and workspace
-    tar -czf "$file" \
-        "$HOME/.config" \
-        "$HOME/Workspace" \
-        "$HOME/Templates" \
-        "$HOME/.thunderbird" \
-        "$HOME/.config/libreoffice" \
-        2>/dev/null || true
-        
-    log_info "Configuration and workspace backed up to $file"
-}
-
-# === Uninstall Option ===
-uninstall_all() {
-    log_warn "This will remove all installed SME tools and shortcuts."
-    read -p "Are you sure? (y/N): " -n 1 -r; echo
-    [[ $REPLY =~ ^[Yy]$ ]] || { log_info "Uninstall cancelled."; return; }
-
-    backup_configs
-
-    # Remove APT packages
-    local packages=(
-        thunderbird libreoffice gnucash gimp inkscape keepassxc veracrypt 
-        deja-dup filezilla kmymoney scribus kdenlive audacity pdfarranger 
-        syncthing torbrowser-launcher baobab htop glances simple-scan 
-        ocrfeeder gtimelog ktimetracker hamster-time-tracker python3-pip
-        nodejs npm build-essential gitk meld darktable rawtherapee
-        seahorse gnome-keyring gparted timeshift stacer
-    )
-    
-    for pkg in "${packages[@]}"; do
-        if dpkg -l | grep -q "^ii  $pkg "; then
-            sudo apt remove --purge -y "$pkg" 2>/dev/null || true
-        fi
-    done
-    
-    # Clean up dependencies
-    sudo apt autoremove -y --purge
-    
-    # Remove snaps
-    sudo snap remove element-desktop 2>/dev/null || true
-    sudo snap remove code 2>/dev/null || true
-    
-    # Remove desktop shortcuts and web app entries
-    rm -f \
-        "$HOME/Desktop/"*.desktop \
-        "$HOME/.local/share/applications/"jitsi-meet-web.desktop \
-        "$HOME/.local/share/applications/"google-meet-web.desktop
-    
-    log_info "Uninstall complete. Configs backed up to os-for-work-backups/"
 }
 
 # === Post-install Summary ===
 show_summary() {
     log_info "=== Installation Complete ==="
     echo ""
-    echo "📦 Installed Suites:"
-    echo "  ✅ Productivity: LibreOffice, Thunderbird, GnuCash, GIMP, Inkscape"
-    echo "  ✅ Communication: Element, Jitsi Meet, Google Meet"
-    echo "  ✅ Finance: KMyMoney"
-    echo "  ✅ Creative: Scribus, Kdenlive, Audacity, Darktable"
-    echo "  ✅ Security: Syncthing, Tor Browser, Encryption tools"
-    echo "  ✅ Utilities: System monitoring, scanning, backup tools"
-    echo "  ✅ Time Tracking: gtimelog, Hamster, KTimeTracker"
-    echo "  ✅ Development: VS Code, Python, Node.js, Git"
+    echo "📦 Installation Summary:"
+    echo "  Most requested applications have been installed"
+    echo "  Some packages may have been skipped due to availability"
     echo ""
     echo "📁 Your Workspace:"
     echo "  Location: $HOME/Workspace/"
     echo "  Templates: $HOME/Templates/"
-    echo "  Shortcuts: Created on Desktop"
     echo ""
     echo "🔧 Next Steps:"
-    echo "  1. Configure Thunderbird with your email accounts"
-    echo "  2. Set up GnuCash or KMyMoney for business finances"
-    echo "  3. Explore the templates in ~/Templates/"
-    echo "  4. Log out and back in for Snap applications to appear"
+    echo "  1. Configure your email in Thunderbird"
+    echo "  2. Explore the templates in ~/Templates/"
+    echo "  3. Log out and back in for all applications to appear"
     echo ""
-    echo "💼 Need team features or server setup?"
-    echo "   Visit: https://your-company.com/business-hub"
-    echo ""
+    echo "📋 Log file: $LOGFILE"
     echo "========================================="
 }
 
@@ -466,9 +532,12 @@ show_menu() {
     echo "3) Install Communication Suite Only" 
     echo "4) Install Finance & Time Tracking"
     echo "5) Setup Workspace & Shortcuts Only"
-    echo "6) Uninstall All"
+    echo "6) Uninstall All Applications"
     echo "7) Show Summary"
     echo "8) Exit"
+    echo "========================================="
+    echo "Note: Installation will continue even if"
+    echo "some packages fail to install."
     echo "========================================="
 }
 
@@ -490,6 +559,9 @@ install_everything() {
 
 # === Main Function ===
 main() {
+    # Trap to catch CTRL+C
+    trap 'log_info "Installation interrupted by user"; exit 1' INT
+    
     detect_distro
     check_dependencies
     
@@ -505,13 +577,21 @@ main() {
             6) uninstall_all ;;
             7) show_summary ;;
             8) log_info "Exiting. Log file: $LOGFILE"; exit 0 ;;
-            *) log_error "Invalid option." ;;
+            *) log_error "Invalid option. Please choose 1-8." ;;
         esac
+        echo ""
         read -p "Press Enter to continue..."
     done
 }
 
-# Script entry point
+# Script entry point with better error handling
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
+    log_info "=== OS for Work Installer Started ==="
+    if main "$@"; then
+        log_info "=== Installer finished successfully ==="
+    else
+        log_error "=== Installer finished with errors ==="
+        log_info "Check the log file: $LOGFILE"
+        exit 1
+    fi
 fi
