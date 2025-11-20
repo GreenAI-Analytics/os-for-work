@@ -41,7 +41,7 @@ os-for-work/
 Clone the repository and run the installer:
 
 ```bash
-git clone [https://github.com/your-org/os-for-work](https://github.com/GreenAI-Analytics/os-for-work).git
+git clone https://github.com/GreenAI-Analytics/os-for-work.git
 cd os-for-work
 chmod +x install.sh
 ./install.sh
