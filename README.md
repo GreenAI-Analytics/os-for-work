@@ -36,16 +36,7 @@ During installation, you’ll be prompted to select categories or run a full set
 ---
 
 ## ⚙️ Usage
-- Run `./install.sh` for guided setup.
-- Use `./install.sh --all` to install everything.
-- Use `./install.sh --category <name>` to install a specific category (e.g., `finance`).
-
----
-
-## 🔧 Customization
-- Add or remove packages in `modules/<category>.sh`.
-- Adjust defaults in `install.sh` for organization‑wide policies.
-- Extend with new categories (e.g., HR, compliance) by adding a new script under `modules/`.
+- Run `./install.sh` for guided setup
 
 ---
 
